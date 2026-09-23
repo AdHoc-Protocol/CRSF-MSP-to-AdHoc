@@ -15,6 +15,67 @@ The machine-readable part of both lives in the C headers of the reference firmwa
 C-header reader plus hand-maintained tables for the parts that exist only in prose (crsf-wg wiki) or in C code
 (`msp.c`). The project is self-contained: it carries its own copy of the AdHoc emitter helpers
 (`src/org/unirail/adhoc/`) and its own `validate.sh`.
+## Before and after
+
+`samples/crsf/crsf_protocol.h` is 553 lines of packed C structs; here is a 22-line window of it
+([source](samples/crsf/crsf_protocol.h)) beside what the converter makes of it ([result](AdHoc/CRSF.cs)).
+The battery frame is the interesting one: four C bit fields, whose widths are real claims about the values, so
+they survive as `[MinMax]` ranges that AdHoc bit-packs itself.
+
+```c
+//CRSF_FRAMETYPE_BATTERY_SENSOR
+typedef struct crsf_sensor_battery_s
+{
+    unsigned voltage : 16;  // mv * 100 BigEndian
+    unsigned current : 16;  // ma * 100
+    unsigned capacity : 24; // mah
+    unsigned remaining : 8; // %
+} PACKED crsf_sensor_battery_t;
+
+// CRSF_FRAMETYPE_BARO_ALTITUDE
+typedef struct crsf_sensor_baro_vario_s
+{
+    uint16_t altitude; // Altitude in decimeters + 10000dm, or Altitude in meters if high bit is set, BigEndian
+    int16_t verticalspd;  // Vertical speed in cm/s, BigEndian
+} PACKED crsf_sensor_baro_vario_t;
+
+// CRSF_FRAMETYPE_AIRSPEED
+typedef struct crsf_sensor_airspeed_s
+{
+    uint16_t speed;             // Airspeed in 0.1 * km/h (hectometers/h)
+} PACKED crsf_sensor_airspeed_t;
+// ... 23 more payload structs, the frame-type and address enums, and the framing #defines
+```
+
+```csharp
+class BATTERY_SENSOR {
+    // CRSF frame type byte - the source protocol's identity, not this pack's AdHoc id.
+    public const int frame_type = 0x8;
+    /**
+    mv * 100 BigEndian
+    */
+    [Bits(16), MinMax(0, 65535)] ushort voltage;
+    // ... current, same shape
+    /**
+    mah
+    */
+    [Bits(24), MinMax(0, 16777215)] uint capacity;
+    [Bits(8), MinMax(0, 255)] byte remaining;
+}
+
+class BARO_ALTITUDE {
+    public const int frame_type = 0x9;
+    // physics: dm + 10000 offset, so ground level sits at 10000 -> [A(10000)] would pay, but the high bit switches the scale to metres; settle that first
+    ushort altitude;
+    // physics: vertical speed in cm/s, centred on zero, typically well under 1 000 -> consider [X(3_000)]
+    short verticalspd;
+}
+```
+
+The frame type left the Dashboard and became a `const`: a pack id is AdHoc's own matter and the agent assigns it.
+The `// physics:` comments are the converter handing the reader a decision it cannot take itself — see
+[Limitations](#limitations).
+
 
 ## Sources (all links verified)
 
@@ -151,10 +212,19 @@ source numbers are checked in the `frame_type` / `msp_id` constants instead.
   with or without `{` on the same line, `PACKED` structs, C++ base struct) and nothing more elaborate.
 - A section comment placed directly above the first `#define` of a group (e.g. "Multiwii original MSP commands
   (101-139)") is attached to that define's doc.
-- **No varint attributes.** `[A]` / `[V]` / `[X]` are emitted nowhere: both protocols are fixed-width and
-  big-endian on the wire and neither states anything about where a number's values sit, so a varint attribute
-  would be a guess — and on a uniformly distributed field it makes the wire *bigger*. Bit-field widths, which the
-  source does state, are carried as hard `[MinMax]` ranges instead, which AdHoc bit-packs.
+- **No varint attribute is emitted, but the question is never dropped.** A C header declares a *width*, not where
+  the values sit, and a width is not a distribution — how CRSF or MSP arranges its own bytes decides nothing here,
+  because AdHoc lays out its own frame. So `[A]` / `[V]` / `[X]` would be a guess, and on a uniformly distributed
+  field a varint makes the wire *bigger*. What the sources do state — in units (`cdegC`, `cm/s`, `mAh`,
+  radians × 10000), in field names and in comments — is carried to the field as a `// physics:` note naming the
+  candidate and the reason, so the decision is taken where it belongs, by someone with real traffic in hand.
+  47 fields carry one: attitude, vario and IMU axes are centred on zero (`[X]`); consumption counters, distances
+  and error counters climb from zero (`[A]`); channel values, motor outputs, headings and percentages are hard
+  ranges that bit-pack tighter than any varint (`[MinMax]`); and scaled coordinates, identity words and bitmasks
+  are named as varint *losses* so nobody tries. The arithmetic is stated once per file: a varint wins while the
+  typical distance from its base stays under about two million, breaks even to 268 435 455, and always loses
+  beyond that.
+- Bit-field widths, which *are* a claim about a range, stay as hard `[MinMax]` ranges, which AdHoc bit-packs.
 - No pack id is pinned: source numbers live in the protocol's own enum and in a `const` inside each pack, and the
   agent assigns pack ids freely.
 - Agent quirks respected by the emitter: enums carry no base type (or `: long` when a value needs it) and constants

@@ -71,6 +71,7 @@ public class CHeaders2AdHoc {
 			Path f = out.resolve("MSP.cs");
 			Files.write(f, new Msp(samples).emit().getBytes(StandardCharsets.UTF_8));
 			System.out.println("MSP  -> " + f);
+			checkPhysicsUsed();   // both files are emitted: every PHYSICS row must have matched a real field
 		} catch (Exception e) {
 			failed++;
 			System.err.println("FAILED MSP: " + e);
@@ -365,7 +366,9 @@ public class CHeaders2AdHoc {
 	/** Parses a hand-table field spec `type name // doc` (types: byte sbyte ushort short uint int, T[N], T[,,N], string(N), bool, Pack). */
 	static final Pattern SPEC = Pattern.compile("^([A-Za-z_]\\w*)(\\?)?(?:\\[(\\d+)\\]|\\[,,(\\d+)\\]|\\((\\d+)\\))?\\s+([A-Za-z_]\\w*)\\s*(?://\\s*(.*))?$");
 
-	static void specField(StringBuilder sb, String indent, String spec) {
+	static void specField(StringBuilder sb, String indent, String spec) { specField(sb, indent, spec, null); }
+
+	static void specField(StringBuilder sb, String indent, String spec, String owner) {
 		Matcher m = SPEC.matcher(spec.trim());
 		if (!m.matches()) throw new IllegalArgumentException("Bad field spec: " + spec);
 		String type = m.group(1), name = m.group(6), d = m.group(7);
@@ -375,7 +378,107 @@ public class CHeaders2AdHoc {
 		else if (m.group(5) != null) { attr = "[D(+" + m.group(5) + ")] "; }
 		if (m.group(2) != null) type += "?";
 		doc(sb, indent, d);
+		physics(sb, indent, owner, name);
 		sb.append(indent).append(attr).append(type).append(' ').append(ident(name)).append(";\n");
+	}
+
+	// ── physics of a number ──
+
+	/**
+	 * Candidate varint attributes, one row per field the source tells us something about: {pack, field, note}.
+	 * Neither CRSF nor MSP declares a distribution, but units, field names and comments imply one, and that is
+	 * a statement about the data rather than about the source's wire format - AdHoc lays out its own frame, so
+	 * "the C header stores this fixed-width" decides nothing.
+	 *
+	 * <p>These are emitted as comments, never as attributes: choosing `[A]`/`[V]`/`[X]` is a decision taken with
+	 * real traffic in hand, and a converter cannot take it. What it must not do is drop the question silently.
+	 * Every row is checked against the emitted model, so a renamed field fails the conversion.
+	 */
+	static final String[][] PHYSICS = {
+			// CRSF — telemetry
+			{"ATTITUDE", "pitch", "attitude in rad*10000, centred on zero, |v| <= 31416 -> consider [X(31416)]"},
+			{"ATTITUDE", "roll", "attitude in rad*10000, centred on zero, |v| <= 31416 -> consider [X(31416)]"},
+			{"ATTITUDE", "yaw", "attitude in rad*10000, centred on zero, |v| <= 31416 -> consider [X(31416)]"},
+			{"VARIO", "verticalspd", "vertical speed in cm/s, centred on zero, typically well under 1 000 -> consider [X(3_000)]"},
+			{"BARO_ALTITUDE", "verticalspd", "vertical speed in cm/s, centred on zero, typically well under 1 000 -> consider [X(3_000)]"},
+			{"BARO_ALTITUDE", "altitude", "dm + 10000 offset, so ground level sits at 10000 -> [A(10000)] would pay, but the high bit switches the scale to metres; settle that first"},
+			{"GPS", "latitude", "degrees * 1e7, systematically up to 1.8e9: varint always loses past 268 435 455 - leave fixed"},
+			{"GPS", "longitude", "degrees * 1e7, systematically up to 1.8e9: varint always loses past 268 435 455 - leave fixed"},
+			{"GPS", "altitude", "metres + 1000 offset, so ground level sits at 1000 and values climb from there -> consider [A(1000)]"},
+			{"GPS", "gps_heading", "degrees * 100, a hard 0..36000 range, uniform within it -> consider [MinMax(0, 36_000)] (bit-packs to 16 bits)"},
+			{"TEMP", "temperature", "deci-degrees Celsius, centred near ambient, |v| < 1 000 for anything survivable -> consider [X(1_000)] (1 byte per element instead of 2)"},
+			{"CELLS", "cell", "cell voltage in mV, a hard 0..4500 range -> consider [MinMax(0, 4_500)]: 13 bits per cell across the array, where varint would be a wash"},
+			// CRSF — timing and identity
+			{"HANDSET", "rate", "packet interval in us*10 (30 030 at 333 Hz, 200 000 at 50 Hz): the distance from zero stays under two million, so varint pays -> consider [A]"},
+			{"HANDSET", "offset", "phase-shift correction, a signed adjustment centred on zero -> consider [X]"},
+			{"DEVICE_INFO", "serialNo", "an identity word, uniformly distributed across 32 bits: varint costs a fifth byte - leave fixed"},
+			{"DEVICE_INFO", "hardwareVer", "a packed version word, uniformly distributed: varint costs a fifth byte - leave fixed"},
+			{"DEVICE_INFO", "softwareVer", "a packed version word, uniformly distributed: varint costs a fifth byte - leave fixed"},
+			// MSP
+			{"MSP_ATTITUDE_Reply", "rollDecidegrees", "decidegrees, centred on zero, |v| <= 1800 -> consider [X(1_800)]"},
+			{"MSP_ATTITUDE_Reply", "pitchDecidegrees", "decidegrees, centred on zero, |v| <= 1800 -> consider [X(1_800)]"},
+			{"MSP_ATTITUDE_Reply", "yawDegrees", "a hard 0..359 range -> consider [MinMax(0, 359)] (9 bits)"},
+			{"MSP_ALTITUDE_Reply", "altitudeCm", "estimated altitude in cm, centred on the launch point, |v| under a few hundred thousand -> consider [X(1_000_000)]"},
+			{"MSP_ALTITUDE_Reply", "varioCmPerS", "vertical speed in cm/s, centred on zero -> consider [X(3_000)]"},
+			{"MSP_RAW_IMU_Reply", "acc", "accelerometer counts, centred on zero -> consider [X]"},
+			{"MSP_RAW_IMU_Reply", "gyro", "angular rate in deg/s, centred on zero and small in level flight -> consider [X(2_000)]"},
+			{"MSP_RAW_IMU_Reply", "mag", "magnetometer counts, centred on zero -> consider [X]"},
+			{"MSP_ANALOG_Reply", "mAhDrawn", "consumption from a full pack: starts at zero and climbs, never returns -> consider [A]"},
+			{"MSP_ANALOG_Reply", "amperageCentiamps", "current in 0.01 A, a declared -320..320 A range centred on zero -> consider [X(32_000)]"},
+			{"MSP_ANALOG_Reply", "rssi", "a hard 0..1023 range -> consider [MinMax(0, 1_023)] (10 bits)"},
+			{"MSP_BATTERY_STATE_Reply", "mAhDrawn", "consumption from a full pack: starts at zero and climbs -> consider [A]"},
+			{"MSP_BATTERY_STATE_Reply", "amperageCentiamps", "current in 0.01 A, a declared -320..320 A range centred on zero -> consider [X(32_000)]"},
+			{"MSP_BATTERY_STATE_Reply", "voltageCentivolts", "pack voltage clusters tightly at the cell count times the nominal cell voltage; a hard [MinMax] fits it in bits, where a 16-bit varint would only break even"},
+			{"MSP_STATUS_Reply", "i2cErrorCount", "an error counter that is zero on a healthy board -> consider [A]"},
+			{"MSP_STATUS_Reply", "cpuLoadPercent", "a hard 0..100 range -> consider [MinMax(0, 100)] (7 bits)"},
+			{"MSP_STATUS_Reply", "flightModeFlags", "a bitmask, every bit independent: varint has no leading zeroes to drop - leave fixed"},
+			{"MSP_STATUS_Reply", "armingDisableFlags", "a bitmask, every bit independent: varint has no leading zeroes to drop - leave fixed"},
+			{"MSP_RAW_GPS_Reply", "latitudeDegE7", "degrees * 1e7, systematically up to 1.8e9: varint always loses past 268 435 455 - leave fixed"},
+			{"MSP_RAW_GPS_Reply", "longitudeDegE7", "degrees * 1e7, systematically up to 1.8e9: varint always loses past 268 435 455 - leave fixed"},
+			{"MSP_RAW_GPS_Reply", "altitudeM", "altitude in metres above sea level, small and positive for almost every flight -> consider [A]"},
+			{"MSP_RAW_GPS_Reply", "groundCourseDecidegrees", "a hard 0..3600 range -> consider [MinMax(0, 3_600)] (12 bits)"},
+			{"MSP_COMP_GPS_Reply", "distanceToHomeM", "distance from the launch point: starts at zero and stays small -> consider [A]"},
+			{"MSP_COMP_GPS_Reply", "directionToHomeDegrees", "a hard 0..359 range -> consider [MinMax(0, 359)] (9 bits)"},
+			{"MSP_RC_Reply", "channels", "RC channel values, a hard 1000..2000 range -> consider [MinMax(1_000, 2_000)]: 10 bits per channel across the array"},
+			{"MSP_SET_RAW_RC_Request", "channels", "RC channel values, a hard 1000..2000 range -> consider [MinMax(1_000, 2_000)]: 10 bits per channel across the array"},
+			{"MSP_MOTOR_Reply", "motor", "motor outputs, a hard 0..2000 range (0 = disabled) -> consider [MinMax(0, 2_000)]: 11 bits per motor"},
+			{"MSP_SET_MOTOR_Request", "motor", "motor outputs, a hard 0..2000 range -> consider [MinMax(0, 2_000)]: 11 bits per motor"},
+	};
+
+	static final Map<String, String> PHYSICS_BY_FIELD = new LinkedHashMap<>();
+	static final Set<String> PHYSICS_SEEN = new HashSet<>();
+
+	static {
+		for (String[] row : PHYSICS)
+			if (PHYSICS_BY_FIELD.put(row[0] + "." + row[1], row[2]) != null)
+				throw new IllegalStateException("Duplicate PHYSICS row " + row[0] + "." + row[1]);
+	}
+
+	/** Emits the physics comment of `owner.field`, if there is one, and records that the row was used. */
+	static void physics(StringBuilder sb, String indent, String owner, String fieldName) {
+		if (owner == null) return;
+		String note = PHYSICS_BY_FIELD.get(owner + "." + fieldName);
+		if (note == null) return;
+		PHYSICS_SEEN.add(owner + "." + fieldName);
+		sb.append(indent).append("// physics: ").append(note).append('\n');
+	}
+
+	/** Fails loudly when a PHYSICS row names a pack or field that the emitted model no longer has. */
+	static void checkPhysicsUsed() {
+		List<String> unused = new ArrayList<>();
+		for (String key : PHYSICS_BY_FIELD.keySet()) if (!PHYSICS_SEEN.contains(key)) unused.add(key);
+		if (!unused.isEmpty())
+			throw new IllegalStateException("PHYSICS rows that match no emitted field (upstream renamed or removed them): " + unused);
+	}
+
+	/** The varint arithmetic, stated once per file so the comments below it need not repeat it. */
+	static void varintNote(StringBuilder sb, String indent) {
+		doc(sb, indent, "This protocol declares widths, not distributions, so the converter emits no [A] / [V] / [X]: choosing one "
+				+ "is a decision taken with real traffic in hand. Where a unit, a field name or a comment does imply where the values sit, "
+				+ "the field carries a `// physics:` note naming the candidate.\n"
+				+ "The arithmetic behind those notes: a varint costs one byte per 7 bits of distance from its base, so it wins while the "
+				+ "typical distance stays under about two million, breaks even up to 268 435 455, and always loses beyond that. A span "
+				+ "narrower than one byte is rejected outright and belongs in [MinMax], which bit-packs it.");
 	}
 
 	static void constants(StringBuilder sb, String indent, String name, String doc, Collection<Define> defs) {
@@ -545,6 +648,8 @@ public class CHeaders2AdHoc {
 
 			defaultMaxLength(sb, I2, "A CRSF payload is 60 bytes (58 for an extended frame), but a parameter value or a tunnelled MSP frame is chunked across several frames and reassembled, so the caps are raised past AdHoc's 255-item default.");
 
+			varintNote(sb, I2);
+
 			// ── constants ──
 			List<Define> framing = new ArrayList<>(), channel = new ArrayList<>(), msp = new ArrayList<>();
 			for (Define d : h.defines) {
@@ -587,11 +692,11 @@ public class CHeaders2AdHoc {
 				if (f.struct != null && f.struct.base != null) sb.append(" : ").append(packOf(f.struct.base));
 				sb.append(" {\n");
 				sourceId(sb, I3, "frame_type", "0x" + Long.toHexString(f.id).toUpperCase(), "CRSF frame type byte - the source protocol's identity, not this pack's AdHoc id.");
-				if (f.prefix != null) for (String s : f.prefix) specField(sb, I3, s);
-				if (f.struct != null) for (CField x : f.struct.fields) { doc(sb, I3, x.doc); sb.append(I3).append(field(x, enumTypes)).append('\n'); }
-				else if (f.table != null) for (String s : f.table) specField(sb, I3, s);
+				if (f.prefix != null) for (String s : f.prefix) specField(sb, I3, s, f.packName);
+				if (f.struct != null) for (CField x : f.struct.fields) { doc(sb, I3, x.doc); physics(sb, I3, f.packName, x.name); sb.append(I3).append(field(x, enumTypes)).append('\n'); }
+				else if (f.table != null) for (String s : f.table) specField(sb, I3, s, f.packName);
 				else sb.append(I3).append("[D(60)] byte[,,] payload;\n");
-				if (f.extra != null) for (String s : f.extra) specField(sb, I3, s);
+				if (f.extra != null) for (String s : f.extra) specField(sb, I3, s, f.packName);
 				sb.append(I2).append("}\n\n");
 			}
 
@@ -603,7 +708,7 @@ public class CHeaders2AdHoc {
 				sb.append(I2).append("class ").append(plain(s.name));
 				if (s.base != null) sb.append(" : ").append(packOf(s.base));
 				sb.append(" {\n");
-				for (CField x : s.fields) { doc(sb, I3, x.doc); sb.append(I3).append(field(x, enumTypes)).append('\n'); }
+				for (CField x : s.fields) { doc(sb, I3, x.doc); physics(sb, I3, plain(s.name), x.name); sb.append(I3).append(field(x, enumTypes)).append('\n'); }
 				sb.append(I2).append("}\n\n");
 			}
 
@@ -743,6 +848,8 @@ public class CHeaders2AdHoc {
 
 			defaultMaxLength(sb, I2, "An MSP v2 payload is up to 65535 bytes, so the caps are raised past AdHoc's 255-item default; a v1 payload stays within 255.");
 
+			varintNote(sb, I2);
+
 			sb.append(I2).append("// ═════════════════════════ constants ═════════════════════════\n\n");
 			constants(sb, I2, "Constants", "Non-command #defines of the MSP headers: protocol/API version, identifier lengths, capability bits, MSP2_GET_TEXT variable ids.", constants);
 			doc(sb, I2, "Framing of an MSP frame on the serial link (msp_serial.c, iNav wiki MSP-V2):\nv1: '$' 'M' dir(<|>|!) size:u8 cmd:u8 payload crc8-xor;  v2: '$' 'X' dir flags:u8 function:u16 size:u16 payload crc8-dvb-s2.\nA v2 frame may also ride inside a v1 frame with cmd = MSP_V2_FRAME (255).");
@@ -787,7 +894,7 @@ public class CHeaders2AdHoc {
 					doc(sb, I2, d.toString());
 					sb.append(I2).append("class ").append(c.name).append('_').append(side).append(" {\n");
 					sourceId(sb, I3, "msp_id", c.raw, "MSP command id - the source protocol's identity, not this pack's AdHoc id.");
-					if (specs != null) for (String s : specs) specField(sb, I3, s);
+					if (specs != null) for (String s : specs) specField(sb, I3, s, c.name + "_" + side);
 					else if (side.equals("Reply") ? !c.doc.contains("in message") : c.doc.contains("in message"))
 						sb.append(I3).append("[D(65_535)] byte[,,] payload;\n");
 					sb.append(I2).append("}\n\n");

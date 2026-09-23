@@ -405,6 +405,14 @@ namespace org.msp {
             Strings = 65_535,
         }
 
+        /**
+        This protocol declares widths, not distributions, so the converter emits no [A] / [V] / [X]: choosing one is a
+        decision taken with real traffic in hand. Where a unit, a field name or a comment does imply where the values
+        sit, the field carries a `// physics:` note naming the candidate.
+        The arithmetic behind those notes: a varint costs one byte per 7 bits of distance from its base, so it wins
+        while the typical distance stays under about two million, breaks even up to 268 435 455, and always loses
+        beyond that. A span narrower than one byte is rejected outright and belongs in [MinMax], which bit-packs it.
+        */
         // ═════════════════════════ constants ═════════════════════════
 
         /**
@@ -2582,6 +2590,7 @@ namespace org.msp {
             // MSP command id - the source protocol's identity, not this pack's AdHoc id.
             public const int msp_id = 101;
             ushort pidLoopTimeUs;
+            // physics: an error counter that is zero on a healthy board -> consider [A]
             ushort i2cErrorCount;
             /**
             bit0 acc, bit1 baro, bit2 mag, bit3 gps, bit4 rangefinder, bit5 gyro, bit6 optical flow, bit7 pitot
@@ -2590,8 +2599,10 @@ namespace org.msp {
             /**
             first 32 box bits
             */
+            // physics: a bitmask, every bit independent: varint has no leading zeroes to drop - leave fixed
             uint flightModeFlags;
             byte pidProfileIndex;
+            // physics: a hard 0..100 range -> consider [MinMax(0, 100)] (7 bits)
             ushort cpuLoadPercent;
             /**
             always 0 now
@@ -2603,6 +2614,7 @@ namespace org.msp {
             byte extraFlightModeFlagsCount;
             [D(15)] byte[,,] extraFlightModeFlags;
             byte armingDisableFlagsCount;
+            // physics: a bitmask, every bit independent: varint has no leading zeroes to drop - leave fixed
             uint armingDisableFlags;
             /**
             bit0 reboot required
@@ -2638,14 +2650,17 @@ namespace org.msp {
             /**
             accelerometer ADC, x y z
             */
+            // physics: accelerometer counts, centred on zero -> consider [X]
             [D(3)] short[] acc;
             /**
             gyro rate, deg/s
             */
+            // physics: angular rate in deg/s, centred on zero and small in level flight -> consider [X(2_000)]
             [D(3)] short[] gyro;
             /**
             magnetometer ADC
             */
+            // physics: magnetometer counts, centred on zero -> consider [X]
             [D(3)] short[] mag;
         }
 
@@ -2685,6 +2700,7 @@ namespace org.msp {
             /**
             external motor value per output, 0 when the motor is disabled
             */
+            // physics: motor outputs, a hard 0..2000 range (0 = disabled) -> consider [MinMax(0, 2_000)]: 11 bits per motor
             [D(8)] ushort[] motor;
         }
 
@@ -2706,6 +2722,7 @@ namespace org.msp {
             /**
             one value per RX channel, up to MAX_SUPPORTED_RC_CHANNEL_COUNT
             */
+            // physics: RC channel values, a hard 1000..2000 range -> consider [MinMax(1_000, 2_000)]: 10 bits per channel across the array
             [D(18)] ushort[,,] channels;
         }
 
@@ -2726,13 +2743,17 @@ namespace org.msp {
             public const int msp_id = 106;
             byte fixType;
             byte numSat;
+            // physics: degrees * 1e7, systematically up to 1.8e9: varint always loses past 268 435 455 - leave fixed
             int latitudeDegE7;
+            // physics: degrees * 1e7, systematically up to 1.8e9: varint always loses past 268 435 455 - leave fixed
             int longitudeDegE7;
             /**
             1m per lsb for backwards compatibility
             */
+            // physics: altitude in metres above sea level, small and positive for almost every flight -> consider [A]
             ushort altitudeM;
             ushort groundSpeedCmPerS;
+            // physics: a hard 0..3600 range -> consider [MinMax(0, 3_600)] (12 bits)
             ushort groundCourseDecidegrees;
             /**
             API 1.44
@@ -2755,7 +2776,9 @@ namespace org.msp {
         class MSP_COMP_GPS_Reply {
             // MSP command id - the source protocol's identity, not this pack's AdHoc id.
             public const int msp_id = 107;
+            // physics: distance from the launch point: starts at zero and stays small -> consider [A]
             ushort distanceToHomeM;
+            // physics: a hard 0..359 range -> consider [MinMax(0, 359)] (9 bits)
             ushort directionToHomeDegrees;
             byte gpsUpdate;
         }
@@ -2775,8 +2798,11 @@ namespace org.msp {
         class MSP_ATTITUDE_Reply {
             // MSP command id - the source protocol's identity, not this pack's AdHoc id.
             public const int msp_id = 108;
+            // physics: decidegrees, centred on zero, |v| <= 1800 -> consider [X(1_800)]
             short rollDecidegrees;
+            // physics: decidegrees, centred on zero, |v| <= 1800 -> consider [X(1_800)]
             short pitchDecidegrees;
+            // physics: a hard 0..359 range -> consider [MinMax(0, 359)] (9 bits)
             short yawDegrees;
         }
 
@@ -2798,10 +2824,12 @@ namespace org.msp {
             /**
             estimated altitude
             */
+            // physics: estimated altitude in cm, centred on the launch point, |v| under a few hundred thousand -> consider [X(1_000_000)]
             int altitudeCm;
             /**
             estimated vertical speed
             */
+            // physics: vertical speed in cm/s, centred on zero -> consider [X(3_000)]
             short varioCmPerS;
         }
 
@@ -2824,11 +2852,14 @@ namespace org.msp {
             0.1V steps, clamped to 255
             */
             byte legacyVoltageDecivolts;
+            // physics: consumption from a full pack: starts at zero and climbs, never returns -> consider [A]
             ushort mAhDrawn;
+            // physics: a hard 0..1023 range -> consider [MinMax(0, 1_023)] (10 bits)
             ushort rssi;
             /**
             0.01A steps
             */
+            // physics: current in 0.01 A, a declared -320..320 A range centred on zero -> consider [X(32_000)]
             short amperageCentiamps;
             /**
             0.01V steps
@@ -3170,12 +3201,15 @@ namespace org.msp {
             byte cellCount;
             ushort capacityMah;
             byte legacyVoltageDecivolts;
+            // physics: consumption from a full pack: starts at zero and climbs -> consider [A]
             ushort mAhDrawn;
+            // physics: current in 0.01 A, a declared -320..320 A range centred on zero -> consider [X(32_000)]
             short amperageCentiamps;
             /**
             batteryState_e
             */
             byte batteryState;
+            // physics: pack voltage clusters tightly at the cell count times the nominal cell voltage; a hard [MinMax] fits it in bits, where a 16-bit varint would only break even
             ushort voltageCentivolts;
         }
 
@@ -3780,6 +3814,7 @@ namespace org.msp {
             /**
             channel count derived from the payload size, up to MAX_SUPPORTED_RC_CHANNEL_COUNT
             */
+            // physics: RC channel values, a hard 1000..2000 range -> consider [MinMax(1_000, 2_000)]: 10 bits per channel across the array
             [D(18)] ushort[,,] channels;
         }
 
@@ -4005,6 +4040,7 @@ namespace org.msp {
             /**
             one external motor value per motor
             */
+            // physics: motor outputs, a hard 0..2000 range -> consider [MinMax(0, 2_000)]: 11 bits per motor
             [D(8)] ushort[,,] motor;
         }
 

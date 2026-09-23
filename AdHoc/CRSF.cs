@@ -58,6 +58,14 @@ namespace org.crsf {
             Strings = 65_535,
         }
 
+        /**
+        This protocol declares widths, not distributions, so the converter emits no [A] / [V] / [X]: choosing one is a
+        decision taken with real traffic in hand. Where a unit, a field name or a comment does imply where the values
+        sit, the field carries a `// physics:` note naming the candidate.
+        The arithmetic behind those notes: a varint costs one byte per 7 bits of distance from its base, so it wins
+        while the typical distance stays under about two million, breaks even up to 268 435 455, and always loses
+        beyond that. A span narrower than one byte is rejected outright and belongs in [MinMax], which bit-packs it.
+        */
         // ═════════════════════════ framing constants (#define / anonymous enum) ═════════════════════════
 
         /**
@@ -375,10 +383,12 @@ namespace org.crsf {
             /**
             degree / 10`000`000
             */
+            // physics: degrees * 1e7, systematically up to 1.8e9: varint always loses past 268 435 455 - leave fixed
             int latitude;
             /**
             degree / 10`000`000
             */
+            // physics: degrees * 1e7, systematically up to 1.8e9: varint always loses past 268 435 455 - leave fixed
             int longitude;
             /**
             km/h / 10
@@ -387,10 +397,12 @@ namespace org.crsf {
             /**
             degree / 100
             */
+            // physics: degrees * 100, a hard 0..36000 range, uniform within it -> consider [MinMax(0, 36_000)] (bit-packs to 16 bits)
             ushort gps_heading;
             /**
             meter ­1000m offset
             */
+            // physics: metres + 1000 offset, so ground level sits at 1000 and values climb from there -> consider [A(1000)]
             ushort altitude;
             /**
             counter
@@ -423,6 +435,7 @@ namespace org.crsf {
             /**
             Vertical speed in cm/s, BigEndian
             */
+            // physics: vertical speed in cm/s, centred on zero, typically well under 1 000 -> consider [X(3_000)]
             short verticalspd;
         }
 
@@ -461,10 +474,12 @@ namespace org.crsf {
             /**
             Altitude in decimeters + 10000dm, or Altitude in meters if high bit is set, BigEndian
             */
+            // physics: dm + 10000 offset, so ground level sits at 10000 -> [A(10000)] would pay, but the high bit switches the scale to metres; settle that first
             ushort altitude;
             /**
             Vertical speed in cm/s, BigEndian
             */
+            // physics: vertical speed in cm/s, centred on zero, typically well under 1 000 -> consider [X(3_000)]
             short verticalspd;
         }
 
@@ -540,6 +555,7 @@ namespace org.crsf {
             /**
             up to 20 temperature values in deci-degree (tenths of a degree) Celsius (e.g., 250 = 25.0°C, -50 = -5.0°C)
             */
+            // physics: deci-degrees Celsius, centred near ambient, |v| < 1 000 for anything survivable -> consider [X(1_000)] (1 byte per element instead of 2)
             [D(20)] short[] temperature;
         }
 
@@ -556,6 +572,7 @@ namespace org.crsf {
             /**
             up to 29 cell values in a resolution of a thousandth of a Volt (e.g. 3.850V = 3850)
             */
+            // physics: cell voltage in mV, a hard 0..4500 range -> consider [MinMax(0, 4_500)]: 13 bits per cell across the array, where varint would be a wash
             [D(29)] ushort[] cell;
         }
 
@@ -630,14 +647,17 @@ namespace org.crsf {
             /**
             radians * 10000
             */
+            // physics: attitude in rad*10000, centred on zero, |v| <= 31416 -> consider [X(31416)]
             short pitch;
             /**
             radians * 10000
             */
+            // physics: attitude in rad*10000, centred on zero, |v| <= 31416 -> consider [X(31416)]
             short roll;
             /**
             radians * 10000
             */
+            // physics: attitude in rad*10000, centred on zero, |v| <= 31416 -> consider [X(31416)]
             short yaw;
         }
 
@@ -674,8 +694,11 @@ namespace org.crsf {
             null-terminated device name; EdgeTX/ExpressLRS limit it to 15 characters (wiki CRSF_FRAMETYPE_DEVICE_INFO.md)
             */
             [D(+16)] string displayName;
+            // physics: an identity word, uniformly distributed across 32 bits: varint costs a fifth byte - leave fixed
             uint serialNo;
+            // physics: a packed version word, uniformly distributed: varint costs a fifth byte - leave fixed
             uint hardwareVer;
+            // physics: a packed version word, uniformly distributed: varint costs a fifth byte - leave fixed
             uint softwareVer;
             /**
             number of field of params this device has
@@ -810,10 +833,12 @@ namespace org.crsf {
             /**
             Big-Endian
             */
+            // physics: packet interval in us*10 (30 030 at 333 Hz, 200 000 at 50 Hz): the distance from zero stays under two million, so varint pays -> consider [A]
             uint rate;
             /**
             Big-Endian
             */
+            // physics: phase-shift correction, a signed adjustment centred on zero -> consider [X]
             uint offset;
         }
 
